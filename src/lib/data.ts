@@ -1045,6 +1045,43 @@ function shuffleInPlace<T>(arr: T[], rng: () => number): T[] {
 }
 
 /**
+ * Reject a ratio that would leave the caller with no training data, before
+ * anything is read or written.
+ *
+ * Both failure modes end the same way. A ratio of `NaN` makes `Math.max` return
+ * `NaN`, so `trainCount` is `NaN` and `shuffled.slice(0, NaN)` is `[]`. A ratio
+ * of 1 or more makes `trainCount` zero or negative, and `slice` reads a negative
+ * end as an offset from the end of the array, so the train half comes back
+ * empty as well. Either way `train.jsonl` is rewritten with nothing in it while
+ * the examples are still on disk, having silently stopped being trained on --
+ * and because `valid.jsonl` now exists, `ensureValidationSet` never splits
+ * again, so nothing corrects it. It also reports counts that do not describe
+ * what it wrote: a ratio of 1.2 over ten examples returns `trainCount: -2` and
+ * `validCount: 12` for files holding eight and two.
+ *
+ * None of this is reachable from the CLI today, which always passes 0.1. It is
+ * worth rejecting anyway because the ratio is a parameter, and the first caller
+ * to pass a user-supplied one should not have to rediscover this.
+ */
+function assertValidRatio(ratio: number): void {
+	if (typeof ratio !== 'number' || !Number.isFinite(ratio)) {
+		throw new Error(
+			`Validation ratio must be a finite number, got ${
+				typeof ratio === 'number' ? ratio : typeof ratio
+			}.`,
+		);
+	}
+	if (ratio < 0) {
+		throw new Error(`Validation ratio must be 0 or greater, got ${ratio}.`);
+	}
+	if (ratio >= 1) {
+		throw new Error(
+			`Validation ratio must be less than 1 so at least one training example remains, got ${ratio}.`,
+		);
+	}
+}
+
+/**
  * Split training data into train and validation sets.
  * MLX requires a valid.jsonl file for training.
  * @param validationRatio - Portion of data to use for validation (default 10%)
@@ -1054,6 +1091,12 @@ export function splitTrainValidation(
 	validationRatio = 0.1,
 	seed?: number,
 ): {trainCount: number; validCount: number} {
+	// Ahead of the `allExamples.length === 0` early return too: an empty dataset
+	// makes the arithmetic below harmless, but a caller who passed a nonsense
+	// ratio has a bug worth hearing about whether or not it happens to have any
+	// data to lose.
+	assertValidRatio(validationRatio);
+
 	const allExamples = loadTrainingData();
 
 	if (allExamples.length === 0) {

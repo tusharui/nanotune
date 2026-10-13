@@ -1691,6 +1691,111 @@ test.serial(
   },
 );
 
+// ── splitTrainValidation ratio guards ──────────────────────────────────
+//
+// Each case below reached `saveTrainingData` on its own and emptied
+// train.jsonl. The assertions that matter are the file contents: the throw is
+// only half the fix, because the damage was the rewrite that used to follow it.
+
+test.serial(
+  "splitTrainValidation refuses a NaN ratio instead of writing an empty train.jsonl",
+  (t) => {
+    seedExamples(10);
+
+    // Math.max(1, NaN) is NaN, so trainCount is NaN and slice(0, NaN) is [].
+    t.throws(() => splitTrainValidation(Number.NaN, 1), {
+      message: /finite/,
+    });
+
+    t.is(countExamples(false), 10);
+    t.is(countExamples(true), 0);
+    t.deepEqual(
+      loadTrainingData(false).map((ex) => ex.messages[1].content),
+      Array.from({ length: 10 }, (_, i) => `q${i}`),
+    );
+  },
+);
+
+test.serial(
+  "splitTrainValidation refuses a ratio of 1 or more instead of writing an empty train.jsonl",
+  (t) => {
+    // 1.2 over ten examples: validCount 12, trainCount -2. slice reads the
+    // negative end as an offset from the end, so the train half comes back
+    // empty. It also returns trainCount: -2, which describes nothing.
+    for (const ratio of [1, 1.2, 2, 100]) {
+      rmSync(join(DATA_DIR, "valid.jsonl"), { force: true });
+      writeFileSync(
+        join(DATA_DIR, "train.jsonl"),
+        Array.from({ length: 10 }, (_, i) =>
+          JSON.stringify({
+            messages: [
+              { role: "user", content: `q${i}` },
+              { role: "assistant", content: `a${i}` },
+            ],
+          }),
+        ).join("\n") + "\n",
+      );
+
+      t.throws(() => splitTrainValidation(ratio, 1), { message: /less than 1/ });
+
+      t.is(countExamples(false), 10, `ratio ${ratio} emptied train.jsonl`);
+      t.is(countExamples(true), 0, `ratio ${ratio} split anyway`);
+    }
+  },
+);
+
+test.serial("splitTrainValidation refuses a negative or non-numeric ratio", (t) => {
+  seedExamples(10);
+
+  t.throws(() => splitTrainValidation(-0.5, 1), { message: /0 or greater/ });
+  t.throws(() => splitTrainValidation(Number.POSITIVE_INFINITY, 1), {
+    message: /finite/,
+  });
+  t.throws(() => splitTrainValidation(Number.NaN, 1), { message: /finite/ });
+
+  t.is(countExamples(false), 10);
+  t.is(countExamples(true), 0);
+});
+
+test.serial(
+  "splitTrainValidation still splits the boundary ratios it always accepted",
+  (t) => {
+    // 0 means "the smallest validation set that is still one", which is what
+    // Math.max(1, ...) has always meant here. Just under 1 leaves one training
+    // example. Neither is a rejection the guard introduced.
+    seedExamples(10);
+    const lowest = splitTrainValidation(0, 1);
+    t.is(lowest.validCount, 1);
+    t.is(lowest.trainCount, 9);
+
+    rmSync(join(DATA_DIR, "valid.jsonl"), { force: true });
+    rmSync(join(DATA_DIR, "train.jsonl"), { force: true });
+    seedExamples(10);
+    const highest = splitTrainValidation(0.9, 1);
+    t.is(highest.validCount, 9);
+    t.is(highest.trainCount, 1);
+  },
+);
+
+test.serial(
+  "the ratio guard does not change what a valid ratio splits into",
+  (t) => {
+    // The guard rejects; it must not reshape. Same seed, same bytes as before it
+    // existed, for the ratio the CLI actually uses.
+    seedExamples(40);
+    const result = splitTrainValidation(0.1, 42);
+    t.is(result.validCount, 4);
+    t.is(result.trainCount, 36);
+    t.is(countExamples(false) + countExamples(true), 40);
+    t.deepEqual(
+      [...loadTrainingData(false), ...loadTrainingData(true)]
+        .map((ex) => ex.messages[1].content)
+        .sort(),
+      Array.from({ length: 40 }, (_, i) => `q${i}`).sort(),
+    );
+  },
+);
+
 // ── splitTrainValidation crash-safety (#162) ──────────────────────────
 
 test.serial(
